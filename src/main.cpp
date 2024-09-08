@@ -90,7 +90,6 @@ void getStatus(AsyncWebServerRequest *request) {
 }
 
 void getSettings(AsyncWebServerRequest *request) {
-    Serial.println("getSettings");
     StaticJsonDocument<1024> doc;
     char buffer[1024];
     addFloat(&doc,"fwd_max",fwd_max);
@@ -133,18 +132,17 @@ void setupApi() {
   server.on("/api/settings",HTTP_GET,[](AsyncWebServerRequest *request){
     getSettings(request);
   });
+  server.on("/api/settings",HTTP_POST,[](AsyncWebServerRequest *request){
+    getSettings(request);
+  },NULL,
+  [](AsyncWebServerRequest * request, uint8_t *data, size_t len, size_t index, size_t total) {
+    if (!handleSettings(request,data)) {
+        request->send(500,"text/plain","Error updating settings");
+    }
+  });
   server.on("/api/unlock", HTTP_GET, [](AsyncWebServerRequest *request){
     unlock();
     getStatus(request);
-  });
-  server.onRequestBody([](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
-    Serial.printf("onRequestBody %s\n",data);
-    if (request->url() == "/api/settings" && request->method() == HTTP_POST) {
-        if (!handleSettings(request,data)) {
-            request->send(500,"text/plain","Error updating settings");
-        }
-        getSettings(request);
-    }
   });
   server.serveStatic("/", SPIFFS, "/").setDefaultFile("index.html");
   server.serveStatic("/static/", SPIFFS, "/");
