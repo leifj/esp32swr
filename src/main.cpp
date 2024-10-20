@@ -3,11 +3,13 @@
 #include <ArduinoJson.h>
 #include <WiFiManager.h>
 #include <ESPAsyncWebServer.h>
+#include <ESPAsyncHTTPUpdateServer.h>
 #include <SPIFFS.h>
 #include <SPI.h>
 #include <Adafruit_ADS1X15.h>
 
 AsyncWebServer server(80);
+ESPAsyncHTTPUpdateServer updateServer;
 Adafruit_ADS1115 ads;
 float fwd = 0;
 float rev = 0;
@@ -32,6 +34,10 @@ void addFloat(JsonDocument *doc, String name, float value) {
 }
 
 void addInt(JsonDocument *doc, String name, int value) {
+    (*doc)[name].set(value);
+}
+
+void addString(JsonDocument *doc, String name, String value) {
     (*doc)[name].set(value);
 }
 
@@ -146,6 +152,8 @@ void setupApi() {
   });
   server.serveStatic("/", SPIFFS, "/").setDefaultFile("index.html");
   server.serveStatic("/static/", SPIFFS, "/");
+  updateServer.setup(&server);
+  updateServer.setup(&server,OTA_USER,OTA_PASSWORD);
   server.begin();
 }
 
