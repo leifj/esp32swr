@@ -151,7 +151,7 @@ void setupApi() {
     getStatus(request);
   });
   server.serveStatic("/", SPIFFS, "/").setDefaultFile("index.html");
-  server.serveStatic("/static/", SPIFFS, "/");
+  server.serveStatic("/s/", SPIFFS, "/");
   updateServer.setup(&server);
   updateServer.setup(&server,OTA_USER,OTA_PASSWORD);
   server.begin();

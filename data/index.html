@@ -1,0 +1,40 @@
+<html>
+   <head>
+      <title>esp32swr</title>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width">
+      <meta name="htmx-config" content='{"selfRequestsOnly":false}'>
+      <script src="/s/htmx.min.js"></script>
+      <script src="/s/client-side-templates.js"></script>
+      <script src="/s/mustache.js"></script>
+      <link rel="stylesheet" href="/s/pico.min.css"/>
+   </head>
+   <body>
+      <main class="container">
+      <h1>SWR</h1>
+      <div 
+           hx-ext="client-side-templates"
+           hx-get="/api/status" 
+           hx-target="#content"
+           mustache-template="status" hx-trigger="every 1s">
+         <table class="striped">
+            <thead><tr class="grid">
+               <th>fwd</th>
+               <th>rev</th>
+               <th>vswr</th>
+               <th>active_key</th>
+            </tr></thead>
+            <tbody id="content"></tbody>
+         </table>
+         <template id="status">
+            <tr class="grid">
+               <td>{{fwd}}</td>
+               <td>{{rev}}</td> 
+               <td>{{vswr}}</td>
+               <td>{{active_key}}</td>
+            </tr> 
+         </template>
+      </div>
+      </main>
+   </body>
+</html>
