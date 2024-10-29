@@ -7,20 +7,26 @@
 #include <SPIFFS.h>
 #include <SPI.h>
 #include <Adafruit_ADS1X15.h>
+#include <PicoMQTT.h>
+#include <ESPmDNS.h>
 
 AsyncWebServer server(80);
 ESPAsyncHTTPUpdateServer updateServer;
+PicoMQTT::Client mqtt("10.0.0.77");
+
 Adafruit_ADS1115 ads;
-float fwd = 0;
-float rev = 0;
-float vswr = 0;
+float fwd = 0.0f;
+float rev = 0.0f;
+float vswr = 1.0f;
 float vswr_max = 1.5;
 float rev_max = 1.0;
 float fwd_max = 50.0;
+float fwd_min = 0.001; // roughly 1mW
+float rev_min = 0.1;
 
 static const float multiplier = 0.1875f;
-static const adsGain_t gain = GAIN_TWOTHIRDS;
-static const float callibration = 12.85*6.9/2.7;
+static const adsGain_t gain = GAIN_TWO;
+static const float callibration = 2.7/6.9; //12.85*2.7*1.2/6.9; //12.85*6.9/2.7;
 static const int RELAY_CLOSE = 32;
 bool active_key = true;
 bool auto_unlock = true;
@@ -30,7 +36,7 @@ unsigned int previousMillis = 0;
 unsigned const int interval = 30*1000;
 
 void addFloat(JsonDocument *doc, String name, float value) {
-    (*doc)[name].set(value);
+    (*doc)[name].set(String(value,3));
 }
 
 void addInt(JsonDocument *doc, String name, int value) {
@@ -49,17 +55,34 @@ void addBool(JsonDocument *doc, String name, bool value) {
   }
 }
 
+String getStatusObject() {
+  StaticJsonDocument<1024> doc;
+  addFloat(&doc,"fwd",fwd);
+  addFloat(&doc,"rev",rev);
+  addFloat(&doc,"vswr",vswr);
+  addBool(&doc,"active_key",active_key);
+  addBool(&doc,"auto_unlock",auto_unlock);
+  char buffer[1024];
+  serializeJson(doc, buffer);
+  return String(buffer);
+}
+
 void readSwr() {
-    int16_t fwd_d_raw = ads.readADC_SingleEnded(0);
-    int16_t rev_d_raw = ads.readADC_SingleEnded(2);
+    char msg[1024];
+    int16_t fwd_d_raw = ads.readADC_Differential_0_1(); //ads.readADC_SingleEnded(0);
+    int16_t rev_d_raw = ads.readADC_Differential_2_3(); //ads.readADC_SingleEnded(2);
     if (fwd_d_raw == fwd_d_raw && rev_d_raw == rev_d_raw) {
-        fwd = ads.computeVolts(fwd_d_raw) * callibration;
-        rev = ads.computeVolts(rev_d_raw) * callibration;
-        if (fwd < 0) fwd = 0.0;
-        if (rev < 0) rev = 0.0;
-        float q = sqrtf(rev/fwd);
-        vswr = (1.0f+q)/(1.0f-q);
-        Serial.printf("fwd=%f, rev=%f, q=%f, vswr=%f\n",fwd,rev,q,vswr);
+        float fwd_v = ads.computeVolts(fwd_d_raw) * callibration;
+        float rev_v = ads.computeVolts(rev_d_raw) * callibration;
+        fwd = 50*fwd_v*fwd_v;
+        rev = 50*rev_v*rev_v;
+        if (fwd > fwd_min) {
+          float q = rev_v/fwd_v;
+          vswr = (1.0f+q)/(1.0f-q);
+        } else {
+          vswr = 1.0f;
+        }
+        mqtt.publish("esp32swr/raw",getStatusObject());
     }
 }
 
@@ -76,7 +99,7 @@ void unlock() {
 }
 
 void checkLimits() {
-    if (fwd > fwd_max || rev > rev_max || vswr > vswr_max || vswr < 1.0f) {
+    if (fwd > fwd_max || rev > rev_max || (vswr > vswr_max && rev > rev_min)) {
         lock();
     } else if (!active_key && auto_unlock) {
         unlock();
@@ -89,6 +112,7 @@ void getStatus(AsyncWebServerRequest *request) {
   addFloat(&doc,"rev",rev);
   addFloat(&doc,"vswr",vswr);
   addBool(&doc,"active_key",active_key);
+  addBool(&doc,"auto_unlock",auto_unlock);
   char buffer[1024];
   serializeJson(doc, buffer);
   
@@ -101,6 +125,7 @@ void getSettings(AsyncWebServerRequest *request) {
     addFloat(&doc,"fwd_max",fwd_max);
     addFloat(&doc,"rev_max",rev_max);
     addFloat(&doc,"vswr_max",vswr_max);
+    addFloat(&doc,"rev_min",rev_min);
     addInt(&doc,"cooldown",cooldown);
     addBool(&doc,"auto_unlock",auto_unlock);
     serializeJson(doc, buffer);
@@ -115,6 +140,9 @@ bool handleSettings(AsyncWebServerRequest *request, uint8_t *datas) {
     }
     if (doc.containsKey("rev_max")) {
         rev_max = doc["rev_max"].as<float>();
+    }
+    if (doc.containsKey("rev_min")) {
+        rev_max = doc["rev_min"].as<float>();
     }
     if (doc.containsKey("vswr_max")) {
         vswr_max = doc["vswr_max"].as<float>();
@@ -148,6 +176,15 @@ void setupApi() {
   });
   server.on("/api/unlock", HTTP_GET, [](AsyncWebServerRequest *request){
     unlock();
+    getStatus(request);
+  });
+  server.on("/api/disable", HTTP_GET, [](AsyncWebServerRequest *request){
+    auto_unlock = false;
+    lock();
+    getStatus(request);
+  });
+  server.on("/api/enable", HTTP_GET, [](AsyncWebServerRequest *request){
+    auto_unlock = true;
     getStatus(request);
   });
   server.serveStatic("/", SPIFFS, "/").setDefaultFile("index.html");
@@ -208,6 +245,19 @@ void setup() {
     ESP.restart();
   }
 
+  mqtt.subscribe("#", [](const char * topic, const char * payload) {
+    Serial.printf("Received message in topic '%s': %s\n", topic, payload);
+  });
+
+  mqtt.begin();
+
+  if (!MDNS.begin("esp32swr")) {   // Set the hostname to "esp32swr.local"
+    Serial.println("Error setting up MDNS responder!");
+    delay(1000);
+  } else {
+    Serial.println("mDNS responder started");
+  }
+  MDNS.addService("http", "tcp", 80);
   setupApi();
 }
 
@@ -224,5 +274,6 @@ void loop() {
   }
   readSwr();
   checkLimits();
-  delay(1000);
+  mqtt.loop();
+  delay(500);
 }
