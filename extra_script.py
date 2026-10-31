@@ -2,6 +2,15 @@ Import("env")
 import os
 import shutil
 
+# OTA password is taken from the environment so it is not committed to git.
+# Never fall back to an empty value: the update server treats an empty
+# username/password as "no authentication" and exposes OTA to the network.
+ota_password = os.environ.get("OTA_PASSWORD") or "ota"
+if not os.environ.get("OTA_PASSWORD"):
+    print("WARNING: OTA_PASSWORD not set, using the default OTA password")
+env.Append(BUILD_FLAGS=['-DOTA_PASSWORD=\\"%s\\"' % ota_password])
+
+
 def sync_web_to_data():
     """Copy web/ -> data/ so the SPIFFS image always matches the sources.
 
@@ -19,5 +28,6 @@ def sync_web_to_data():
     if os.path.isdir(data):
         shutil.rmtree(data)
     shutil.copytree(web, data)
+
 
 sync_web_to_data()
