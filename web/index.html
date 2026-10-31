@@ -1,51 +1,202 @@
-<html>
-   <head>
-      <title>esp32swr</title>
-      <meta charset="utf-8">
-      <meta name="viewport" content="width=device-width">
-      <script src="/s/hyperscript.js"></script>
-      <link rel="stylesheet" href="/s/pico.min.css"/>
-   </head>
-   <body>
-      <main class="container">
-      <h1>SWR</h1>
-      <div>
-         <form class="grid" _="on load
-                   repeat forever 
-                     send check to <fieldset/>
-                     wait 1s
-                   end
-                 end 
-                ">
-            <fieldset _="on check 
-                            fetch /api/status as an Object 
-                            put it into st
-                            send status(st:st) to .status">
-               <button type="button" class="outline status" _="on status(st) 
-                                                    if st.auto_unlock == 'true' remove .outline from me else add .outline to me end
-                                                 on click if me matches .outline fetch /api/enable as an Object else fetch /api/disable as an Object end
-                                                    send check to <fieldset/>" id="auto_unlock">Enabled</button>
-               <button type="button" class="outline status" _="on status(st)
-                                                    if st.active_key == 'true' remove .outline from me else add .outline to me end" id="active_key">Active</button>
-            </fieldset>
-         </form> 
-         <table>
-            <tbody>
-               <tr>
-                  <th>fwd</th>
-                  <td class="status" _="on status(st) log st set my innerHTML to st.fwd" id="fwd"></td>
-               </tr>
-               <tr>
-                  <th>rev</th>
-                  <td class="status" _="on status(st) set my innerHTML to st.rev" id="rev"></td>
-               </tr>
-               <tr>
-                  <th>vswr</th>
-                  <td class="status" _="on status(st) set my innerHTML to st.vswr" id="vswr"></td>
-               </tr>
-            </tbody>
-         </table>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>esp32swr</title>
+  <script src="/s/hyperscript.js"></script>
+  <link rel="stylesheet" href="/s/pico.min.css">
+  <style>
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: .75rem;
+      margin-bottom: 1rem;
+    }
+    .metric {
+      background: var(--pico-card-background-color);
+      border: 1px solid var(--pico-card-border-color);
+      border-radius: var(--pico-border-radius);
+      padding: .6rem .8rem;
+    }
+    .metric small {
+      display: block;
+      color: var(--pico-muted-color);
+      font-size: .72rem;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    .metric strong {
+      font-size: 1.45rem;
+      font-variant-numeric: tabular-nums;
+      line-height: 1.2;
+    }
+    .pill {
+      display: inline-block;
+      padding: .1rem .65rem;
+      border-radius: 999px;
+      font-size: .8rem;
+      background: var(--pico-secondary-background);
+      color: var(--pico-secondary-inverse);
+    }
+    .pill.online { background: #1b7f3b; color: #fff; }
+    .pill.offline { background: #b3261e; color: #fff; }
+    button.active {
+      background: var(--pico-primary);
+      color: var(--pico-primary-inverse);
+      border-color: var(--pico-primary);
+    }
+    button.busy { opacity: .55; pointer-events: none; }
+    #keystate { font-weight: 600; }
+    #updated { color: var(--pico-muted-color); }
+  </style>
+</head>
+<body>
+<main class="container">
+  <header>
+    <hgroup>
+      <h1>esp32swr</h1>
+      <p>SA0LEF SWR power meter</p>
+    </hgroup>
+    <p>
+      <span id="link" class="pill" aria-live="polite">connecting…</span>
+      <small id="updated">waiting for data</small>
+    </p>
+  </header>
+
+  <article id="panel"
+    _="on load
+         repeat forever
+           if document.visibilityState == 'visible'
+             send check to me
+           end
+           wait 1s
+         end
+       end
+       on check
+         fetch /api/status as an Object
+         put it into st
+         send status(st:st) to .status
+         set #updated.textContent to nowString()
+         add .online to #link
+         remove .offline from #link
+         if st.active_key == 'true'
+           set #keystate.textContent to 'Active'
+         else
+           set #keystate.textContent to 'Locked'
+         end
+       catch e
+         add .offline to #link
+         remove .online from #link
+         set #keystate.textContent to 'Offline'
+       end">
+
+    <section class="metric-grid">
+      <div class="metric">
+        <small>SWR</small>
+        <strong class="status"
+          _="on status(st) set my textContent to st.vswr">—</strong>
       </div>
-      </main>
-   </body>
+      <div class="metric">
+        <small>Forward</small>
+        <strong class="status"
+          _="on status(st) set my textContent to st.fwd + ' W'">—</strong>
+      </div>
+      <div class="metric">
+        <small>Reverse</small>
+        <strong class="status"
+          _="on status(st) set my textContent to st.rev + ' W'">—</strong>
+      </div>
+    </section>
+
+    <fieldset role="group">
+      <button id="auto" class="outline status"
+        _="on status(st)
+             if st.auto_unlock == 'true' add .active to me else remove .active from me end
+           on click
+             add .busy to me
+             if me matches .active
+               fetch /api/disable as an Object
+             else
+               fetch /api/enable as an Object
+             end
+             send check to #panel
+           catch e
+             log e
+           finally
+             remove .busy from me
+           end">Auto-relock</button>
+
+      <button id="unlock" class="outline"
+        _="on click
+             add .busy to me
+             fetch /api/unlock as an Object
+             send check to #panel
+           catch e
+             log e
+           finally
+             remove .busy from me
+           end">Unlock</button>
+
+      <span id="keystate">—</span>
+    </fieldset>
+
+    <section class="metric-grid">
+      <div class="metric">
+        <small>Firmware</small>
+        <strong class="status"
+          _="on status(st)
+               if st.version set my textContent to st.version else set my textContent to '—' end">—</strong>
+      </div>
+      <div class="metric">
+        <small>Uptime</small>
+        <strong class="status"
+          _="on status(st) set my textContent to fmtUptime(st.uptime)">—</strong>
+      </div>
+      <div class="metric">
+        <small>Wi-Fi signal</small>
+        <strong class="status"
+          _="on status(st)
+               if st.rssi set my textContent to st.rssi + ' dBm'
+               else set my textContent to '—' end">—</strong>
+      </div>
+      <div class="metric">
+        <small>Free heap</small>
+        <strong class="status"
+          _="on status(st) set my textContent to fmtKB(st.heap)">—</strong>
+      </div>
+    </section>
+  </article>
+
+  <footer>
+    <small>esp32swr meter · <span id="footer-ip">esp32swr.local</span></small>
+  </footer>
+</main>
+
+<noscript>
+  <p>This UI needs JavaScript/hyperscript. The status API is available at <code>/api/status</code>.</p>
+</noscript>
+
+<script>
+  function nowString() {
+    return new Date().toLocaleTimeString();
+  }
+
+  function fmtUptime(seconds) {
+    seconds = Number(seconds) || 0;
+    var h = Math.floor(seconds / 3600);
+    var m = Math.floor((seconds % 3600) / 60);
+    var s = seconds % 60;
+    if (h > 0) return h + 'h ' + m + 'm';
+    if (m > 0) return m + 'm ' + s + 's';
+    return s + 's';
+  }
+
+  function fmtKB(bytes) {
+    bytes = Number(bytes) || 0;
+    return Math.round(bytes / 1024) + ' kB';
+  }
+</script>
+</body>
 </html>
