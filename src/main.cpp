@@ -222,10 +222,11 @@ Reading measureOnce() {
     float revSum = 0.0f;
     float fwdPeak = 0.0f;
     for (int i = 0; i < ADC_WINDOW; i++) {
-        float fwdV = ads.computeVolts(ads.readADC_Differential_0_1()) * CAL_FWD - off_fwd;
-        float revV = ads.computeVolts(ads.readADC_Differential_2_3()) * CAL_REV - off_rev;
-        if (fwdV < 0.0f) fwdV = 0.0f;
-        if (revV < 0.0f) revV = 0.0f;
+        // Detector polarity depends on the coupler winding orientation, so
+        // take the magnitude after offset removal. Clamping to zero instead
+        // would freeze a polarity-reversed channel at 0 W (and SWR at 1.0).
+        float fwdV = fabsf(ads.computeVolts(ads.readADC_Differential_0_1()) * CAL_FWD - off_fwd);
+        float revV = fabsf(ads.computeVolts(ads.readADC_Differential_2_3()) * CAL_REV - off_rev);
         float fwdW = POWER_SCALE * fwdV * fwdV;
         float revW = POWER_SCALE * revV * revV;
         fwdSum += fwdW;
