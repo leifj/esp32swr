@@ -10,31 +10,60 @@
 #include <PicoMQTT.h>
 #include <ESPmDNS.h>
 
-#define FW_VERSION "1.1"
+#define FW_VERSION "1.2"
 
 AsyncWebServer server(80);
 PicoMQTT::Client mqtt("10.0.0.3");
 
 Adafruit_ADS1115 ads;
+
+// Latest averaged reading (published on the API and MQTT).
 float fwd = 0.0f;
 float rev = 0.0f;
 float vswr = 1.0f;
+bool reading_valid = false;
+
 float vswr_max = 1.5;
 float rev_max = 1.0;
 float fwd_max = 50.0;
 float fwd_min = 0.001; // roughly 1mW
 float rev_min = 0.1;
 
-static const float multiplier = 0.1875f;
-static const adsGain_t gain = GAIN_TWO;
-static const float callibration = 2.7/6.9; //12.85*2.7*1.2/6.9; //12.85*6.9/2.7;
+// --- measurement configuration -------------------------------------------
+static const adsGain_t gain = GAIN_TWO;   // +-2.048 V full scale
+// Per-channel detector slope. Forward and reverse couplers have different
+// coupling factors, so they get independent constants.
+static const float CAL_FWD = 2.7/6.9;
+static const float CAL_REV = 2.7/6.9;
+static const float POWER_SCALE = 50.0f;   // W per volt^2 at the detector
+static const int ADC_WINDOW = 16;         // samples averaged per reading
+static const unsigned long LOOP_INTERVAL_MS = 100;    // ~7-10 Hz
+static const unsigned long PUBLISH_INTERVAL_MS = 100;
+
+// Zero-RF baselines measured at boot (volts after calibration).
+float off_fwd = 0.0f;
+float off_rev = 0.0f;
+
+// One measurement window: average powers plus the forward peak, which is
+// what the protection path uses (a single average sample can miss an
+// overshoot between loop passes).
+struct Reading {
+  float fwd;
+  float rev;
+  float fwdPeak;
+  float vswr;
+  bool valid;
+};
+
 static const int RELAY_CLOSE = 32;
 bool active_key = true;
 bool auto_unlock = true;
 int cooldown = 2000;
+unsigned long unlock_at = 0;
 
 unsigned int previousMillis = 0;
 unsigned const int interval = 30*1000;
+unsigned long previousPublish = 0;
 
 // --- OTA -----------------------------------------------------------------
 // Custom handler instead of ESPAsyncHTTPUpdateServer. The library starts a
@@ -153,48 +182,98 @@ String getStatusObject() {
   addFloat(&doc,"vswr",vswr);
   addBool(&doc,"active_key",active_key);
   addBool(&doc,"auto_unlock",auto_unlock);
+  addBool(&doc,"valid",reading_valid);
   char buffer[1024];
   serializeJson(doc, buffer);
   return String(buffer);
 }
 
-void readSwr() {
-    char msg[1024];
-    int16_t fwd_d_raw = ads.readADC_Differential_0_1(); //ads.readADC_SingleEnded(0);
-    int16_t rev_d_raw = ads.readADC_Differential_2_3(); //ads.readADC_SingleEnded(2);
-    if (fwd_d_raw == fwd_d_raw && rev_d_raw == rev_d_raw) {
-        float fwd_v = ads.computeVolts(fwd_d_raw) * callibration;
-        float rev_v = ads.computeVolts(rev_d_raw) * callibration;
-        fwd = 50*fwd_v*fwd_v;
-        rev = 50*rev_v*rev_v;
-        if (fwd > fwd_min) {
-          float q = rev_v/fwd_v;
-          vswr = (1.0f+q)/(1.0f-q);
-        } else {
-          vswr = 1.0f;
-        }
-        if (fwd > fwd_min) {
-          mqtt.publish("esp32swr/raw",getStatusObject());
-        }
+// Average both channels with no RF to remove the detector offset. If the
+// readings look like real RF (someone transmitting at boot), keep zero
+// offsets rather than calibrating against a live signal.
+void calibrateOffsets() {
+    const int N = 32;
+    float fwdSum = 0.0f;
+    float revSum = 0.0f;
+    for (int i = 0; i < N; i++) {
+        fwdSum += ads.computeVolts(ads.readADC_Differential_0_1()) * CAL_FWD;
+        revSum += ads.computeVolts(ads.readADC_Differential_2_3()) * CAL_REV;
+    }
+    float fwdAvg = fwdSum / N;
+    float revAvg = revSum / N;
+    if (fabsf(fwdAvg) < 0.10f && fabsf(revAvg) < 0.10f) {
+        off_fwd = fwdAvg;
+        off_rev = revAvg;
+        Serial.printf("Offset calibration: fwd %.4f V, rev %.4f V\n", off_fwd, off_rev);
+    } else {
+        Serial.println("Offset calibration skipped: RF detected at boot");
     }
 }
 
-void lock() {
+// One measurement window: discard the first conversion after the mux change
+// (ADS1115 settling), then average ADC_WINDOW samples per channel. Negative
+// samples are clamped so noise/offset can never square into phantom power,
+// and the forward peak is tracked for the protection path.
+Reading measureOnce() {
+    ads.readADC_Differential_0_1();
+    ads.readADC_Differential_2_3();
+
+    float fwdSum = 0.0f;
+    float revSum = 0.0f;
+    float fwdPeak = 0.0f;
+    for (int i = 0; i < ADC_WINDOW; i++) {
+        float fwdV = ads.computeVolts(ads.readADC_Differential_0_1()) * CAL_FWD - off_fwd;
+        float revV = ads.computeVolts(ads.readADC_Differential_2_3()) * CAL_REV - off_rev;
+        if (fwdV < 0.0f) fwdV = 0.0f;
+        if (revV < 0.0f) revV = 0.0f;
+        float fwdW = POWER_SCALE * fwdV * fwdV;
+        float revW = POWER_SCALE * revV * revV;
+        fwdSum += fwdW;
+        revSum += revW;
+        if (fwdW > fwdPeak) fwdPeak = fwdW;
+    }
+    Reading r;
+    r.fwd = fwdSum / ADC_WINDOW;
+    r.rev = revSum / ADC_WINDOW;
+    r.fwdPeak = fwdPeak;
+    r.valid = (r.fwd > fwd_min);
+    if (r.valid) {
+        // SWR from the power ratio. q >= 1 means reflected >= forward (open
+        // or short load, or a noisy sample): report the sentinel instead of
+        // dividing by zero and producing inf/NaN.
+        float q = sqrtf(r.rev / r.fwd);
+        r.vswr = (q >= 1.0f) ? 99.0f : (1.0f + q) / (1.0f - q);
+    } else {
+        r.vswr = 1.0f;
+    }
+    return r;
+}
+
+// Non-blocking lock: the relay closes immediately and the auto-unlock
+// deadline is checked from loop(), so measurements, the web UI and MQTT
+// keep running during a fault.
+void lock(unsigned long now) {
+    if (active_key) {
+        Serial.println("locking...");
+    }
     active_key = false;
-    Serial.println("locking...");
-    digitalWrite(RELAY_CLOSE,true);
-    if (auto_unlock) delay(cooldown);
+    digitalWrite(RELAY_CLOSE, HIGH);
+    if (auto_unlock) {
+        unlock_at = now + cooldown;
+    }
 }
 
 void unlock() {
     active_key = true;
-    digitalWrite(RELAY_CLOSE,false);
+    digitalWrite(RELAY_CLOSE, LOW);
 }
 
-void checkLimits() {
-    if (fwd > fwd_max || rev > rev_max || (vswr > vswr_max && rev > rev_min)) {
-        lock();
-    } else if (!active_key && auto_unlock) {
+void checkLimits(const Reading &r, unsigned long now) {
+    bool fault = r.fwdPeak > fwd_max ||
+                 (r.valid && (r.rev > rev_max || (r.vswr > vswr_max && r.rev > rev_min)));
+    if (fault) {
+        lock(now);
+    } else if (!active_key && auto_unlock && (long)(now - unlock_at) >= 0) {
         unlock();
     }
 }
@@ -206,6 +285,7 @@ void getStatus(AsyncWebServerRequest *request) {
   addFloat(&doc,"vswr",vswr);
   addBool(&doc,"active_key",active_key);
   addBool(&doc,"auto_unlock",auto_unlock);
+  addBool(&doc,"valid",reading_valid);
   addString(&doc,"version",FW_VERSION);
   doc["uptime"] = millis() / 1000;
   doc["rssi"] = WiFi.RSSI();
@@ -276,7 +356,7 @@ void setupApi() {
   });
   server.on("/api/disable", HTTP_GET, [](AsyncWebServerRequest *request){
     auto_unlock = false;
-    lock();
+    lock(millis());
     getStatus(request);
   });
   server.on("/api/enable", HTTP_GET, [](AsyncWebServerRequest *request){
@@ -360,6 +440,7 @@ void setup() {
     Serial.println("Failed to initialize ADS.");
     ESP.restart();
   }
+  calibrateOffsets();
 
   mqtt.subscribe("#", [](const char * topic, const char * payload) {
     Serial.printf("Received message in topic '%s': %s\n", topic, payload);
@@ -388,8 +469,22 @@ void loop() {
     WiFi.reconnect();
     previousMillis = currentMillis;
   }
-  readSwr();
-  checkLimits();
+
+  Reading r = measureOnce();
+  fwd = r.fwd;
+  rev = r.rev;
+  vswr = r.vswr;
+  reading_valid = r.valid;
+
+  checkLimits(r, currentMillis);
+
+  // Publish at the loop rate (~7-10 Hz) while there is measurable forward
+  // power; quisk marks the SWR label stale after 1.5 s of silence.
+  if (r.valid && (currentMillis - previousPublish >= PUBLISH_INTERVAL_MS)) {
+    previousPublish = currentMillis;
+    mqtt.publish("esp32swr/raw", getStatusObject());
+  }
+
   mqtt.loop();
-  delay(500);
+  delay(LOOP_INTERVAL_MS);
 }
