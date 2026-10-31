@@ -8,6 +8,31 @@
   <script src="/s/hyperscript.js"></script>
   <link rel="stylesheet" href="/s/pico.min.css">
   <style>
+    [role="tablist"] {
+      display: flex;
+      justify-content: flex-start;
+      gap: .25rem;
+      border-bottom: 1px solid var(--pico-card-border-color);
+      margin-bottom: 1.25rem;
+    }
+    [role="tablist"] [role="tab"] {
+      width: auto;
+      margin: 0;
+      padding: .5rem .9rem;
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      border-radius: 0;
+      box-shadow: none;
+      color: var(--pico-muted-color);
+    }
+    [role="tablist"] [role="tab"]:hover { color: var(--pico-primary); }
+    [role="tablist"] [role="tab"][aria-selected="true"] {
+      color: var(--pico-primary);
+      border-bottom-color: var(--pico-primary);
+      font-weight: 600;
+    }
+    [hidden] { display: none !important; }
     .metric-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
@@ -48,8 +73,15 @@
       border-color: var(--pico-primary);
     }
     button.busy { opacity: .55; pointer-events: none; }
+    /* Pico joins [role=group] buttons into one strip; give them air back. */
+    fieldset[role="group"] { gap: .5rem; }
+    [role="group"] > button:not(:first-child),
+    [role="group"] > button:not(:last-child) {
+      border-radius: var(--pico-border-radius);
+    }
     #keystate { font-weight: 600; }
     #updated { color: var(--pico-muted-color); }
+    progress { margin-top: .75rem; }
   </style>
 </head>
 <body>
@@ -92,80 +124,127 @@
          set #keystate.textContent to 'Offline'
        end">
 
-    <section class="metric-grid">
-      <div class="metric">
-        <small>SWR</small>
-        <strong class="status"
-          _="on status(st) set my textContent to st.vswr">—</strong>
-      </div>
-      <div class="metric">
-        <small>Forward</small>
-        <strong class="status"
-          _="on status(st) set my textContent to st.fwd + ' W'">—</strong>
-      </div>
-      <div class="metric">
-        <small>Reverse</small>
-        <strong class="status"
-          _="on status(st) set my textContent to st.rev + ' W'">—</strong>
-      </div>
+    <nav role="tablist" aria-label="Sections">
+      <button type="button" role="tab" data-tab="swr"
+        aria-selected="true" onclick="selectTab('swr')">SWR</button>
+      <button type="button" role="tab" data-tab="system"
+        aria-selected="false" onclick="selectTab('system')">System</button>
+      <button type="button" role="tab" data-tab="update"
+        aria-selected="false" onclick="selectTab('update')">Update</button>
+    </nav>
+
+    <section id="panel-swr" role="tabpanel" aria-label="SWR">
+      <p>Key: <span id="keystate">—</span></p>
+
+      <fieldset role="group">
+        <button id="auto" class="outline status"
+          _="on status(st)
+               if st.auto_unlock == 'true' add .active to me else remove .active from me end
+             on click
+               add .busy to me
+               if me matches .active
+                 fetch /api/disable as an Object
+               else
+                 fetch /api/enable as an Object
+               end
+               send check to #panel
+             catch e
+               log e
+             finally
+               remove .busy from me
+             end">Auto-relock</button>
+
+        <button id="unlock" class="outline"
+          _="on click
+               add .busy to me
+               fetch /api/unlock as an Object
+               send check to #panel
+             catch e
+               log e
+             finally
+               remove .busy from me
+             end">Unlock</button>
+      </fieldset>
+
+      <section class="metric-grid">
+        <div class="metric">
+          <small>SWR</small>
+          <strong class="status"
+            _="on status(st) set my textContent to st.vswr">—</strong>
+        </div>
+        <div class="metric">
+          <small>Forward</small>
+          <strong class="status"
+            _="on status(st) set my textContent to st.fwd + ' W'">—</strong>
+        </div>
+        <div class="metric">
+          <small>Reverse</small>
+          <strong class="status"
+            _="on status(st) set my textContent to st.rev + ' W'">—</strong>
+        </div>
+      </section>
     </section>
 
-    <fieldset role="group">
-      <button id="auto" class="outline status"
-        _="on status(st)
-             if st.auto_unlock == 'true' add .active to me else remove .active from me end
-           on click
-             add .busy to me
-             if me matches .active
-               fetch /api/disable as an Object
-             else
-               fetch /api/enable as an Object
-             end
-             send check to #panel
-           catch e
-             log e
-           finally
-             remove .busy from me
-           end">Auto-relock</button>
+    <section id="panel-system" role="tabpanel" aria-label="System" hidden>
+      <section class="metric-grid">
+        <div class="metric">
+          <small>Firmware</small>
+          <strong class="status"
+            _="on status(st)
+                 if st.version set my textContent to st.version else set my textContent to '—' end">—</strong>
+        </div>
+        <div class="metric">
+          <small>Uptime</small>
+          <strong class="status"
+            _="on status(st) set my textContent to fmtUptime(st.uptime)">—</strong>
+        </div>
+        <div class="metric">
+          <small>Wi-Fi signal</small>
+          <strong class="status"
+            _="on status(st)
+                 if st.rssi set my textContent to st.rssi + ' dBm'
+                 else set my textContent to '—' end">—</strong>
+        </div>
+        <div class="metric">
+          <small>Free heap</small>
+          <strong class="status"
+            _="on status(st) set my textContent to fmtKB(st.heap)">—</strong>
+        </div>
+      </section>
+    </section>
 
-      <button id="unlock" class="outline"
-        _="on click
-             add .busy to me
-             fetch /api/unlock as an Object
-             send check to #panel
-           catch e
-             log e
-           finally
-             remove .busy from me
-           end">Unlock</button>
+    <section id="panel-update" role="tabpanel" aria-label="Update" hidden>
+      <p><small>
+        Upload the <code>firmware.bin</code> or <code>spiffs.bin</code> produced by PlatformIO.
+        The meter reboots when the upload finishes. Credentials are the OTA user/password
+        compiled into the firmware.
+      </small></p>
 
-      <span id="keystate">—</span>
-    </fieldset>
+      <div class="grid">
+        <label>OTA user
+          <input id="ota-user" value="ota" autocomplete="username">
+        </label>
+        <label>OTA password
+          <input id="ota-pass" type="password" autocomplete="current-password">
+        </label>
+      </div>
 
-    <section class="metric-grid">
-      <div class="metric">
-        <small>Firmware</small>
-        <strong class="status"
-          _="on status(st)
-               if st.version set my textContent to st.version else set my textContent to '—' end">—</strong>
+      <div class="grid">
+        <label>Firmware image
+          <input id="ota-fw" type="file" accept=".bin">
+        </label>
+        <button id="ota-fw-btn" type="button" onclick="otaUpload('firmware')">Upload firmware</button>
       </div>
-      <div class="metric">
-        <small>Uptime</small>
-        <strong class="status"
-          _="on status(st) set my textContent to fmtUptime(st.uptime)">—</strong>
+
+      <div class="grid">
+        <label>Filesystem image
+          <input id="ota-fs" type="file" accept=".bin">
+        </label>
+        <button id="ota-fs-btn" type="button" onclick="otaUpload('filesystem')">Upload filesystem</button>
       </div>
-      <div class="metric">
-        <small>Wi-Fi signal</small>
-        <strong class="status"
-          _="on status(st)
-               if st.rssi set my textContent to st.rssi + ' dBm'
-               else set my textContent to '—' end">—</strong>
-      </div>
-      <div class="metric">
-        <small>Free heap</small>
-        <strong class="status"
-          _="on status(st) set my textContent to fmtKB(st.heap)">—</strong>
-      </div>
+
+      <progress id="ota-progress" value="0" max="100"></progress>
+      <p id="ota-status" role="status" aria-live="polite"></p>
     </section>
   </article>
 
@@ -196,6 +275,83 @@
   function fmtKB(bytes) {
     bytes = Number(bytes) || 0;
     return Math.round(bytes / 1024) + ' kB';
+  }
+
+  function selectTab(name) {
+    var tabs = document.querySelectorAll('[role="tab"]');
+    var found = false;
+    tabs.forEach(function (t) {
+      var on = t.dataset.tab === name;
+      if (on) found = true;
+      t.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    if (!found) name = 'swr';
+    document.querySelectorAll('[role="tabpanel"]').forEach(function (p) {
+      p.hidden = p.id !== 'panel-' + name;
+    });
+    history.replaceState(null, '', '#' + name);
+  }
+
+  selectTab(location.hash.slice(1) || 'swr');
+
+  function otaUpload(kind) {
+    var isFw = kind === 'firmware';
+    var input = document.getElementById(isFw ? 'ota-fw' : 'ota-fs');
+    var button = document.getElementById(isFw ? 'ota-fw-btn' : 'ota-fs-btn');
+    var user = document.getElementById('ota-user').value;
+    var pass = document.getElementById('ota-pass').value;
+    var bar = document.getElementById('ota-progress');
+    var msg = document.getElementById('ota-status');
+    var file = input.files && input.files[0];
+
+    if (!file) {
+      msg.textContent = 'Choose a .bin file first.';
+      return;
+    }
+    if (!pass) {
+      msg.textContent = 'Enter the OTA password.';
+      return;
+    }
+
+    var form = new FormData();
+    form.append(kind, file, file.name);
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/update?name=' + encodeURIComponent(kind));
+    xhr.setRequestHeader('Authorization', 'Basic ' + btoa(user + ':' + pass));
+
+    xhr.upload.onprogress = function (e) {
+      if (!e.lengthComputable) return;
+      var pct = Math.round((e.loaded / e.total) * 100);
+      bar.value = pct;
+      msg.textContent = 'Uploading… ' + pct + '%';
+    };
+
+    xhr.onload = function () {
+      button.disabled = false;
+      button.classList.remove('busy');
+      if (xhr.status === 200) {
+        bar.value = 100;
+        msg.textContent = 'Update accepted — rebooting…';
+        setTimeout(function () { location.reload(); }, 6000);
+      } else if (xhr.status === 401) {
+        msg.textContent = 'Authentication failed. Check the OTA user/password.';
+      } else {
+        msg.textContent = 'Update failed (HTTP ' + xhr.status + ').';
+      }
+    };
+
+    xhr.onerror = function () {
+      button.disabled = false;
+      button.classList.remove('busy');
+      msg.textContent = 'Upload failed — connection lost.';
+    };
+
+    button.disabled = true;
+    button.classList.add('busy');
+    bar.value = 0;
+    msg.textContent = 'Starting upload…';
+    xhr.send(form);
   }
 </script>
 </body>
